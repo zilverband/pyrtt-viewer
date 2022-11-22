@@ -14,7 +14,8 @@ Then you can run the script as a normal executable:
 
 ## Usage
 
-    pyrtt-viewer [-s <serial-number>] [-c <rtt-channel>]
+	pyrtt-viewer [-h] [-i ID] [-c CHANNEL] -d DEVICE_FAMILY -s SPEED
+
 
 
 If you think you'd like to modify the script a bit, install it as a local package:
