@@ -27,19 +27,20 @@ import threading
 import logging
 import argparse
 
-try:
-    from pynrfjprog.API import API
-    from pynrfjprog.API import DeviceFamily as NrfDeviceFamily
-except ImportError:
-    print("Error: Could not find pynrfjprog.")
-    print("Did you run `pip install pynrfjprog`?")
-    sys.exit(1)
+from pynrfjprog.API import API
+from pynrfjprog.API import DeviceFamily as NrfDeviceFamily
+from pynrfjprog.Parameters import decode_enum
 
 
 def get_snr(nrf):
     devices = nrf.enum_emu_snr()
+
+    if len(devices) == 1:
+        return devices[0]
+
     if devices and len(devices) > 0:
         device_range = list(range(len(devices)))
+
         print("Connected devices:")
         print("".join(["%d: %d\n" % (i, devices[i]) for i in device_range]))
 
@@ -60,72 +61,32 @@ def get_snr(nrf):
         print("No devices connected.")
 
 
-def connect(snr=None, jlink_khz=50000):
-    nrf = API(NrfDeviceFamily.NRF52)
-    nrf.open()
-    if not snr:
-        snr = get_snr(nrf)
-
-    if not snr:
-        nrf.close()
-        return None
-
-    nrf.connect_to_emu_with_snr(snr, jlink_khz)
-    try:
-        _version = nrf.read_device_version()  # noqa F81: unused variable
-    except API.APIError as e:
-        if e.err_code == API.NrfjprogdllErr.WRONG_FAMILY_FOR_DEVICE:
-            nrf.close()
-            nrf = API(NrfDeviceFamily.NRF51)
-            nrf.open()
-            if snr:
-                nrf.connect_to_emu_with_snr(snr, jlink_khz)
-            else:
-                nrf.connect_to_emu_without_snr(jlink_khz)
-        else:
-            raise e
-    return nrf
-
-
-def list_devices():
-    nrf = API(NrfDeviceFamily.NRF51)
-    nrf.open()
-    devices = nrf.enum_emu_snr()
-    if devices:
-        print("\n".join(list(map(str, devices))))
-        nrf.close()
-
-
 class RTT:
-    """RTT commication class"""
+    """RTT communication class"""
+
     def __init__(self, nrf, args):
         self._args = args
         self._nrf = nrf
         self._close_event = None
-        self._writer_thread = None
         self._reader_thread = None
-
-    def _writer(self):
-        while not self._close_event.is_set():
-            data = sys.stdin.readline().strip("\n")
-            if len(data) > 0:
-                self._nrf.rtt_write(self._args.channel, data)
-                # Yield
-            time.sleep(0.1)
 
     def _reader(self):
         BLOCK_SIZE = 512
         rtt_data = ""
+
         while not self._close_event.is_set():
             rtt_data = self._nrf.rtt_read(self._args.channel, BLOCK_SIZE)
 
             if rtt_data == "" or type(rtt_data) == int:
                 time.sleep(0.1)
                 continue
+
             rtt_data = rtt_data.rstrip("\r\n")
+
             for s in rtt_data.splitlines():
                 if s.strip() == "":
                     continue
+
                 try:
                     sys.stdout.buffer.write(bytes(s, "ascii"))
                 except TypeError:
@@ -139,6 +100,7 @@ class RTT:
 
         # Wait for RTT to find control block etc.
         time.sleep(0.5)
+
         while not self._nrf.rtt_is_control_block_found():
             logging.info("Looking for RTT control block...")
             self._nrf.rtt_stop()
@@ -148,10 +110,9 @@ class RTT:
 
         self._close_event = threading.Event()
         self._close_event.clear()
+
         self._reader_thread = threading.Thread(target=self._reader)
         self._reader_thread.start()
-        self._writer_thread = threading.Thread(target=self._writer)
-        self._writer_thread.start()
 
         try:
             while self._reader_thread.is_alive() or \
@@ -160,25 +121,44 @@ class RTT:
         except KeyboardInterrupt:
             self._close_event.set()
             self._reader_thread.join()
-            self._writer_thread.join()
 
 
 def main():
     parser = argparse.ArgumentParser("pyrtt-viewer")
-    parser.add_argument("-s", "--segger-id", help="SEGGER ID of the nRF device", type=int)
-    parser.add_argument("-c", "--channel", help="RTT channel", type=int, default=0)
-    args = parser.parse_args()
-    nrf = connect(args.segger_id)
-    if not nrf:
-        exit(1)
 
-    rtt = RTT(nrf, args)
-    try:
-        rtt.run()
-    except KeyboardInterrupt:
-        print("\nExiting...")
-        sys.exit(0)
-    rtt.run()
+    parser.add_argument("-i", "--id", help="SEGGER ID of the nRF device", type=int)
+    parser.add_argument("-c", "--channel", help="RTT channel", type=int, default=0)
+    parser.add_argument("-d", "--device-family", help="Target device family", type=str, required=True)
+    parser.add_argument("-s", "--speed", help="Target speed in kHz", type=int, required=True)
+
+    args = parser.parse_args()
+
+    if decode_enum(args.device_family, NrfDeviceFamily) is None:
+        print("Error: Invalid Nrf device family")
+        return
+
+    with API(args.device_family) as api:
+        if not args.id:
+            snr = get_snr(api)
+        else:
+            snr = args.id
+
+        if not snr:
+            return None
+
+        api.connect_to_emu_with_snr(snr, args.speed)
+
+        print(f"Connected to device in family {args.device_family} with SNR {snr} at speed {args.speed}kHz\n")
+
+        api.read_device_version()
+
+        rtt = RTT(api, args)
+
+        try:
+            rtt.run()
+        except KeyboardInterrupt:
+            print("\nExiting...")
+            return
 
 
 if __name__ == "__main__":
