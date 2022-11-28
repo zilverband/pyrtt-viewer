@@ -30,6 +30,10 @@ import argparse
 from pynrfjprog.API import API
 from pynrfjprog.API import DeviceFamily as NrfDeviceFamily
 from pynrfjprog.Parameters import decode_enum
+from pynrfjprog.APIError import APIError, NrfjprogdllErr
+
+
+BLOCK_SIZE = 512
 
 
 def get_snr(nrf):
@@ -71,11 +75,13 @@ class RTT:
         self._reader_thread = None
 
     def _reader(self):
-        BLOCK_SIZE = 512
         rtt_data = ""
 
         while not self._close_event.is_set():
-            rtt_data = self._nrf.rtt_read(self._args.channel, BLOCK_SIZE)
+            rtt_data = None
+
+            while (rtt_data := self._read()) is None:
+                continue
 
             if rtt_data == "" or type(rtt_data) == int:
                 time.sleep(0.1)
@@ -94,6 +100,18 @@ class RTT:
 
                 sys.stdout.buffer.write(b'\n')
                 sys.stdout.buffer.flush()
+
+    def _read(self) -> str | None:
+        try:
+            rtt_data = self._nrf.rtt_read(self._args.channel, BLOCK_SIZE)
+        except APIError as err:
+            if err.error_enum == NrfjprogdllErr.JLINKARM_DLL_ERROR:
+                time.sleep(1)
+                return None
+            else:
+                raise err
+
+        return rtt_data
 
     def run(self):
         self._nrf.rtt_start()
@@ -115,8 +133,7 @@ class RTT:
         self._reader_thread.start()
 
         try:
-            while self._reader_thread.is_alive() or \
-                  self._writer_thread.is_alive():
+            while self._reader_thread.is_alive():
                 time.sleep(0.1)
         except KeyboardInterrupt:
             self._close_event.set()
